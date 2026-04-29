@@ -1,0 +1,21 @@
+Funcionamiento cámara punto 1:   (codigo_universidad.py)
+
+(QUE AMBOS PI Y PC ESTEN EN LA MISMA RED)
+
+(abrir 1 terminal en la RasPI)
+(1 terminal hacer estos códigos -> sudo fuser -k 9999/tcp    y    python3 servidor2.py)
+
+(abrir código PC) 
+- Cambiar la IP de la raspi si es necesario
+correr el código -> python codigo_universidad.py
+
+-----------------------------
+se debería abrir la ventana en el PC mostrando que ve la cámara 
+
+
+
+Claridad en la arquitectura y los diagramas de simulación (Transparencia Metodológica):
+Disponibilidad de resultados numéricos exactos para validación:
+Uso de un modelo de canal estándar y fundamental (AWGN):
+Uso de una métrica de evaluación universal (BER vs SNR):
+Amplitud comparativa de esquemas de modulación

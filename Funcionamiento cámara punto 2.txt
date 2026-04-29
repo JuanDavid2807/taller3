@@ -1,0 +1,15 @@
+Funcionamiento cámara punto 2:   (enviardatos.py)
+
+(QUE AMBOS PI Y PC ESTEN EN LA MISMA RED)
+
+(abrir 2 terminales en la RasPI)
+(1 terminal hacer estos códigos -> sudo fuser -k 9999/tcp    y    python3 servidor2.py)
+(2 terminal hacer estos códigos  -> cd ros2_ws/     y  source install/setup.bash    y  ros2 run taller2_grupo5 vision_socket_node)
+
+
+(abrir código PC) 
+- Cambiar la IP de la raspi si es necesario
+correr el código python enviardatos.py 
+
+-----------------------------
+se debería abrir la ventana en el PC mostrando que ve la cámara y en la terminal 2 las acciones que recibe para mover los encoders

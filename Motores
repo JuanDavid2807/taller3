@@ -1,0 +1,283 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+// --- Configuración de Red WiFi ---
+const char* ssid = "Robot_Diferencial_ESP32";
+const char* password = "password123"; 
+
+WebServer server(80);
+
+// --- Pines del Chasis (L298N) ---
+const int IN1 = 23;
+const int IN2 = 19;
+const int IN3 = 4;
+const int IN4 = 2;
+const int ENA = 13; 
+const int ENB = 14; 
+const int ENC_L_VERDE = 26;
+const int ENC_R_VERDE = 34; 
+
+// --- PINES DEL MONTACARGAS (TB6612FNG) ---
+const int AIN1 = 22;   
+const int AIN2 = 21;   
+const int PWMA = 5;    
+const int STBY = 15;   
+
+volatile long countL = 0;
+volatile long countR = 0;
+
+void IRAM_ATTR isrL() { countL++; }
+void IRAM_ATTR isrR() { countR++; }
+
+// --- Variables de Control ---
+bool moviendoAdelante = false;
+bool usarPID = false; 
+int basePwmIzq = 255; 
+int basePwmDer = 255;
+int velocidadMontacargas = 255; 
+
+// Variables PID
+unsigned long tiempoAnteriorPID = 0;
+long prevCountL = 0; long prevCountR = 0;
+float errorAcumulado = 0; float errorAnterior = 0;
+float Kp = 1.2; float Ki = 0.05; float Kd = 0.1;  
+int pwmActualIzq = 0; int pwmActualDer = 0;
+
+// --- Interfaz HTML Unificada ---
+const char html_page[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Control Robot David</title>
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; text-align: center; background-color: #1a1a1a; color: #fff; padding: 10px; touch-action: manipulation; }
+    .main-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; margin-top: 15px;}
+    .control-block { background: #2d2d2d; padding: 15px; border-radius: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 70px); justify-content: center; gap: 10px; margin-top: 15px; }
+    .grid-forklift { display: grid; grid-template-columns: 70px; justify-content: center; gap: 10px; margin-top: 15px; }
+    .btn { width: 70px; height: 70px; font-size: 22px; font-weight: bold; border-radius: 12px; border: none; background-color: #4da6ff; color: #1a1a1a; cursor: pointer; transition: 0.1s; }
+    .btn-forklift { background-color: #ffaa00; }
+    .btn:active, .btn.active { transform: scale(0.95); color: white; }
+    .btn-stop { background-color: #ff4d4d; width: 120px; color: white; margin-top: 20px;}
+    .panel { margin-top: 20px; background: #2d2d2d; padding: 15px; border-radius: 10px; display: inline-block; text-align: left; min-width: 280px;}
+    .slider-container { margin-top: 15px; }
+    input[type=range] { width: 100%; margin-top: 5px; }
+    span { font-weight: bold; color: #4da6ff; }
+    h3 { margin-top: 0; color: #ffcc00; text-align: center; font-size: 18px;}
+  </style>
+</head>
+<body>
+  
+  <div class="main-container">
+    <div class="control-block">
+      <h3>🚀 Conducción</h3>
+      <div class="grid">
+        <div></div><button id="btn-W" class="btn" onmousedown="send('W')" onmouseup="send('X')" ontouchstart="send('W')" ontouchend="send('X')">W</button><div></div>
+        <button id="btn-A" class="btn" onmousedown="send('A')" onmouseup="send('X')" ontouchstart="send('A')" ontouchend="send('X')">A</button>
+        <button id="btn-S" class="btn" onmousedown="send('S')" onmouseup="send('X')" ontouchstart="send('S')" ontouchend="send('X')">S</button>
+        <button id="btn-D" class="btn" onmousedown="send('D')" onmouseup="send('X')" ontouchstart="send('D')" ontouchend="send('X')">D</button>
+      </div>
+    </div>
+
+    <div class="control-block">
+      <h3>🏗️ Brazos</h3>
+      <div class="grid-forklift">
+        <button id="btn-R" class="btn btn-forklift" onmousedown="send('U')" onmouseup="send('X')" ontouchstart="send('U')" ontouchend="send('X')">⬆️</button>
+        <button id="btn-F" class="btn btn-forklift" onmousedown="send('J')" onmouseup="send('X')" ontouchstart="send('J')" ontouchend="send('X')">⬇️</button>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn btn-stop" onclick="send('X')">FRENAR TODO</button>
+
+  <div class="panel">
+    <h3>⚙️ Calibración Chasis</h3>
+    <label><input type="checkbox" id="pidToggle" onchange="togglePID()"> Activar PID Automático</label>
+    <div class="slider-container">
+      <label>Max PWM Izq: <span id="valL">255</span></label>
+      <input type="range" id="sliderL" min="100" max="255" value="255" onchange="updatePWM()" oninput="document.getElementById('valL').innerText = this.value">
+    </div>
+    <div class="slider-container">
+      <label>Max PWM Der: <span id="valR">255</span></label>
+      <input type="range" id="sliderR" min="100" max="255" value="255" onchange="updatePWM()" oninput="document.getElementById('valR').innerText = this.value">
+    </div>
+  </div>
+
+  <div class="panel">
+    <p>Encoder L: <span id="eL">0</span> | R: <span id="eR">0</span></p>
+    <p>PWM Real L: <span id="pL">0</span> | R: <span id="pR">0</span></p>
+  </div>
+
+  <script>
+    const keyMap = {
+      'W':'W','ARROWUP':'W', 'A':'A','ARROWLEFT':'A', 'S':'S','ARROWDOWN':'S', 'D':'D','ARROWRIGHT':'D', 
+      'R':'U', // Tecla R para Subir
+      'F':'J', // Tecla F para Bajar
+      ' ':'X'
+    };
+    function send(c) { fetch('/cmd?action=' + c); }
+    
+    function togglePID() { fetch('/setPID?state=' + (document.getElementById('pidToggle').checked ? '1' : '0')); }
+    function updatePWM() { fetch('/setPWM?l=' + document.getElementById('sliderL').value + '&r=' + document.getElementById('sliderR').value); }
+
+    document.addEventListener('keydown', e => {
+      if(e.repeat || document.activeElement.tagName === "INPUT") return;
+      let k = e.key.toUpperCase();
+      if(keyMap[k]) { send(keyMap[k]); document.getElementById('btn-'+k)?.classList.add('active'); }
+    });
+    document.addEventListener('keyup', e => {
+      let k = e.key.toUpperCase();
+      if(keyMap[k]) { send('X'); document.getElementById('btn-'+k)?.classList.remove('active'); }
+    });
+
+    setInterval(() => {
+      fetch('/encoders').then(r => r.json()).then(d => {
+        document.getElementById('eL').innerText = d.izq; document.getElementById('eR').innerText = d.der;
+        document.getElementById('pL').innerText = d.pwml; document.getElementById('pR').innerText = d.pwmr;
+      });
+    }, 250);
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Configuración Pines L298N (Chasis)
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  ledcAttach(ENA, 5000, 8); ledcAttach(ENB, 5000, 8);
+  
+  // Configuración Pines TB6612FNG (Montacargas)
+  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT); pinMode(STBY, OUTPUT);
+  ledcAttach(PWMA, 5000, 8);
+  digitalWrite(STBY, HIGH); // Activar siempre el driver TB6612FNG
+  
+  // Configuración Encoders
+  pinMode(ENC_L_VERDE, INPUT_PULLUP); pinMode(ENC_R_VERDE, INPUT); 
+  attachInterrupt(digitalPinToInterrupt(ENC_L_VERDE), isrL, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENC_R_VERDE), isrR, RISING);
+
+  detenerTodo();
+  
+  WiFi.softAP(ssid, password);
+  server.on("/", []() { server.send(200, "text/html", html_page); });
+  
+  server.on("/setPID", []() { usarPID = (server.arg("state") == "1"); server.send(200, "text/plain", "OK"); });
+  server.on("/setPWM", []() {
+    if (server.hasArg("l")) basePwmIzq = server.arg("l").toInt();
+    if (server.hasArg("r")) basePwmDer = server.arg("r").toInt();
+    if (moviendoAdelante && !usarPID) {
+      pwmActualIzq = basePwmIzq; pwmActualDer = basePwmDer;
+      ledcWrite(ENA, pwmActualIzq); ledcWrite(ENB, pwmActualDer);
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/cmd", []() {
+    if (server.hasArg("action")) ejecutarComando(server.arg("action").charAt(0));
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/encoders", []() {
+    String j = "{\"izq\":" + String(countL) + ",\"der\":" + String(countR) + ",\"pwml\":" + String(pwmActualIzq) + ",\"pwmr\":" + String(pwmActualDer) + "}";
+    server.send(200, "application/json", j);
+  });
+  
+  server.begin();
+  Serial.println("Sistema iniciado. Conéctate al WiFi y entra a 192.168.4.1");
+}
+
+void loop() {
+  server.handleClient();
+  if (moviendoAdelante && usarPID) { calcularPID(); }
+}
+
+void calcularPID() {
+  unsigned long t = millis();
+  if (t - tiempoAnteriorPID >= 50) {
+    long dL = countL - prevCountL; long dR = countR - prevCountR;
+    prevCountL = countL; prevCountR = countR;
+    float error = dL - dR;
+    errorAcumulado = constrain(errorAcumulado + error, -150, 150);
+    float dErr = error - errorAnterior;
+    float ajuste = (Kp * error) + (Ki * errorAcumulado) + (Kd * dErr);
+
+    pwmActualIzq = basePwmIzq; pwmActualDer = basePwmDer;
+    if (ajuste > 0) pwmActualIzq = constrain(basePwmIzq - ajuste, 100, 255);
+    else pwmActualDer = constrain(basePwmDer + ajuste, 100, 255);
+
+    ledcWrite(ENA, pwmActualIzq); ledcWrite(ENB, pwmActualDer);
+    errorAnterior = error; tiempoAnteriorPID = t;
+  }
+}
+
+void ejecutarComando(char c) {
+  if (c == 'X') { detenerTodo(); return; }
+  
+  // Comandos de los Brazos
+  if (c == 'U') { subirMontacargas(); return; }
+  if (c == 'J') { bajarMontacargas(); return; }
+
+  // Comandos del Chasis
+  if (c == 'W') {
+    if (!moviendoAdelante) { 
+      prevCountL = countL; prevCountR = countR;
+      errorAcumulado = 0; errorAnterior = 0;
+      moviendoAdelante = true; 
+      pwmActualIzq = basePwmIzq; pwmActualDer = basePwmDer;
+    }
+    adelante();
+  } else {
+    moviendoAdelante = false;
+    pwmActualIzq = basePwmIzq; pwmActualDer = basePwmDer;
+    ledcWrite(ENA, pwmActualIzq); ledcWrite(ENB, pwmActualDer);
+    if(c=='S') atras(); else if(c=='A') izquierda(); else if(c=='D') derecha();
+  }
+}
+
+// ================= FUNCIONES DE MOVIMIENTO CORREGIDAS =================
+
+void adelante() { 
+  // Invertido por software: Ahora avanza correctamente
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); 
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); 
+  ledcWrite(ENA, pwmActualIzq); ledcWrite(ENB, pwmActualDer); 
+}
+
+void atras() { 
+  // Invertido por software: Ahora retrocede correctamente
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); 
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); 
+}
+
+void izquierda() { 
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); 
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); 
+}
+
+void derecha() { 
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); 
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); 
+}
+
+void subirMontacargas() { 
+  digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW); 
+  ledcWrite(PWMA, velocidadMontacargas); 
+}
+
+void bajarMontacargas() { 
+  digitalWrite(AIN1, LOW); digitalWrite(AIN2, HIGH); 
+  ledcWrite(PWMA, velocidadMontacargas); 
+}
+
+void detenerTodo() { 
+  moviendoAdelante = false; 
+  digitalWrite(IN1,0); digitalWrite(IN2,0); digitalWrite(IN3,0); digitalWrite(IN4,0); 
+  ledcWrite(ENA,0); ledcWrite(ENB,0); 
+  pwmActualIzq=0; pwmActualDer=0; 
+  
+  digitalWrite(AIN1, LOW); digitalWrite(AIN2, LOW);
+  ledcWrite(PWMA, 0);
+}
